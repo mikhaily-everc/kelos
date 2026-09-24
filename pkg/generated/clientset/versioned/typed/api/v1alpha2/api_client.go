@@ -30,6 +30,7 @@ type ApiV1alpha2Interface interface {
 	RESTClient() rest.Interface
 	AgentConfigsGetter
 	SessionsGetter
+	SessionMessagesGetter
 	SessionSpawnersGetter
 	TasksGetter
 	TaskBudgetsGetter
@@ -52,6 +53,10 @@ func (c *ApiV1alpha2Client) AgentConfigs(namespace string) AgentConfigInterface 
 
 func (c *ApiV1alpha2Client) Sessions(namespace string) SessionInterface {
 	return newSessions(c, namespace)
+}
+
+func (c *ApiV1alpha2Client) SessionMessages(namespace string) SessionMessageInterface {
+	return newSessionMessages(c, namespace)
 }
 
 func (c *ApiV1alpha2Client) SessionSpawners(namespace string) SessionSpawnerInterface {

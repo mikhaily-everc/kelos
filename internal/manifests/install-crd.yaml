@@ -8038,6 +8038,263 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.0
+  name: sessionmessages.kelos.dev
+spec:
+  group: kelos.dev
+  names:
+    kind: SessionMessage
+    listKind: SessionMessageList
+    plural: sessionmessages
+    shortNames:
+    - smsg
+    singular: sessionmessage
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.sessionName
+      name: Session
+      type: string
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha2
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SessionMessage delivers a message, input answer, interrupt, or pending-turn
+          removal to a running Session.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SessionMessageSpec defines a request delivered to a running
+              Session.
+            properties:
+              answers:
+                additionalProperties:
+                  description: SessionInputAnswer lists the answers given to one input
+                    question.
+                  items:
+                    maxLength: 4096
+                    type: string
+                  maxItems: 32
+                  type: array
+                description: Answers maps input question IDs to their answers when
+                  type is input.
+                maxProperties: 32
+                type: object
+              cancel:
+                description: |-
+                  Cancel cancels the pending input request instead of answering it when type
+                  is input.
+                type: boolean
+              inputID:
+                description: |-
+                  InputID identifies the pending input request answered when type is input.
+                  When omitted, the input request reported in the status of the SessionMessage
+                  named by TaskRef is answered.
+                maxLength: 253
+                type: string
+              sessionName:
+                description: |-
+                  SessionName is the name of the Session in the same namespace that receives
+                  this message.
+                maxLength: 63
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              taskRef:
+                description: |-
+                  TaskRef names an earlier SessionMessage of type message for the same Session.
+                  Type input answers that message's pending input request when InputID is
+                  omitted. Type remove removes the pending turn that carries that message.
+                maxLength: 253
+                type: string
+              text:
+                description: |-
+                  Text is the user message submitted when type is message. It is submitted
+                  as plain text; terminal and web chat commands such as !COMMAND and /goal are
+                  not interpreted.
+                maxLength: 65536
+                type: string
+              type:
+                description: Type selects what the Session runtime does with this
+                  message.
+                enum:
+                - message
+                - input
+                - interrupt
+                - remove
+                type: string
+            required:
+            - sessionName
+            - type
+            type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
+            - message: text is required when type is message
+              rule: self.type != 'message' || (has(self.text) && size(self.text) >
+                0)
+            - message: inputID or taskRef is required when type is input
+              rule: self.type != 'input' || has(self.inputID) || has(self.taskRef)
+            - message: answers or cancel is required when type is input
+              rule: self.type != 'input' || (has(self.cancel) && self.cancel) || (has(self.answers)
+                && size(self.answers) > 0)
+            - message: taskRef is required when type is remove
+              rule: self.type != 'remove' || has(self.taskRef)
+          status:
+            description: SessionMessageStatus defines the observed state of a SessionMessage.
+            properties:
+              acceptedAt:
+                description: AcceptedAt is when the runtime accepted the message.
+                format: date-time
+                type: string
+              completedAt:
+                description: CompletedAt is when the message reached a terminal phase.
+                format: date-time
+                type: string
+              input:
+                description: Input describes the pending input request while Phase
+                  is InputRequired.
+                properties:
+                  id:
+                    description: ID identifies the input request in SessionMessage.spec.inputID.
+                    type: string
+                  questions:
+                    description: Questions lists the questions that must be answered.
+                    items:
+                      description: SessionInputQuestion describes one question that
+                        blocks the active turn.
+                      properties:
+                        header:
+                          description: Header is a short label for the question.
+                          type: string
+                        id:
+                          description: ID identifies the question in SessionMessage.spec.answers.
+                          type: string
+                        multiSelect:
+                          description: MultiSelect reports whether more than one option
+                            may be selected.
+                          type: boolean
+                        options:
+                          description: Options lists the structured answers offered
+                            for the question.
+                          items:
+                            description: SessionInputOption describes one structured
+                              answer offered for an input question.
+                            properties:
+                              description:
+                                description: Description explains the answer.
+                                type: string
+                              label:
+                                description: Label is the answer value.
+                                type: string
+                            required:
+                            - label
+                            type: object
+                          type: array
+                        question:
+                          description: Question is the question text.
+                          type: string
+                        secret:
+                          description: Secret reports whether the answer should be
+                            treated as sensitive.
+                          type: boolean
+                      required:
+                      - id
+                      - question
+                      type: object
+                    type: array
+                required:
+                - id
+                type: object
+              mergedInto:
+                description: |-
+                  MergedInto names the SessionMessage whose pending turn this message was
+                  appended to, when the message did not start a turn of its own.
+                type: string
+              message:
+                description: Message is a human-readable explanation for the current
+                  phase.
+                type: string
+              phase:
+                description: |-
+                  Phase is the delivery and outcome phase of the message. An empty phase
+                  means Pending.
+                enum:
+                - Pending
+                - Accepted
+                - Working
+                - InputRequired
+                - Completed
+                - Failed
+                - Canceled
+                - Rejected
+                type: string
+              podUID:
+                description: PodUID identifies the Session Pod that processed the
+                  message.
+                type: string
+              reason:
+                description: Reason is a machine-readable explanation for the current
+                  phase.
+                type: string
+              requestID:
+                description: RequestID is the runtime request ID used to deliver the
+                  message.
+                type: string
+              result:
+                description: Result holds the final assistant response when Phase
+                  is Completed.
+                properties:
+                  text:
+                    description: Text is the last assistant message of the turn, truncated
+                      to 16384 characters.
+                    maxLength: 16384
+                    type: string
+                  truncated:
+                    description: Truncated reports whether Text was shortened.
+                    type: boolean
+                type: object
+              turnID:
+                description: TurnID identifies the Session turn that carries the message.
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
   name: sessionspawners.kelos.dev
 spec:
   group: kelos.dev

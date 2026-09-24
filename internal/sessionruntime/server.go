@@ -58,9 +58,19 @@ type Config struct {
 	Environment          []string
 	PublishSessionStatus SessionStatusPublisher
 	SessionName          string
+	SessionUID           types.UID
 	PodUID               types.UID
 	SessionClient        clientv1alpha2.SessionInterface
+	SessionMessageClient clientv1alpha2.SessionMessageInterface
 }
+
+var (
+	errSessionReclaiming      = errors.New("Session is idle and is being reclaimed")
+	errSessionDraining        = errors.New("Session runtime is draining for an update; retry after it reconnects")
+	errSessionProviderStopped = errors.New("Session provider is restarting; retry after it reconnects")
+	errSessionPendingCommand  = errors.New("Session already has a pending command or message")
+	errSessionPendingMessage  = errors.New("Session already has a pending message")
+)
 
 type turnRequest struct {
 	id          string
@@ -386,6 +396,9 @@ func (s *Server) Serve(ctx context.Context) error {
 	go s.runTurns(serveCtx)
 	if err := s.deliverInitialPrompt(); err != nil {
 		return err
+	}
+	if s.config.SessionMessageClient != nil {
+		go s.runSessionMessages(serveCtx)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(s.config.SocketPath), 0700); err != nil {
@@ -961,38 +974,45 @@ func (s *Server) submitMessage(text, requestID string, attachmentIDs ...string) 
 }
 
 func (s *Server) submitParsedMessage(text, requestID string, command sessionCommand, attachmentIDs ...string) error {
+	_, _, err := s.submitParsedMessageTurn(text, requestID, command, attachmentIDs...)
+	return err
+}
+
+// submitParsedMessageTurn submits a message and returns the turn that carries
+// it and whether it was merged into an already pending turn.
+func (s *Server) submitParsedMessageTurn(text, requestID string, command sessionCommand, attachmentIDs ...string) (string, bool, error) {
 	if strings.TrimSpace(text) == "" && len(attachmentIDs) == 0 {
-		return errors.New("message must not be empty")
+		return "", false, errors.New("message must not be empty")
 	}
 	resolvedAttachments, err := s.resolveAttachmentIDs(attachmentIDs)
 	if err != nil {
-		return err
+		return "", false, err
 	}
 	attachments := make([]Attachment, len(resolvedAttachments))
 	for index := range resolvedAttachments {
 		attachments[index] = resolvedAttachments[index].Attachment
 	}
 	if command.kind != sessionCommandMessage && len(attachments) > 0 {
-		return errors.New("Session commands do not accept attachments")
+		return "", false, errors.New("Session commands do not accept attachments")
 	}
 	if command.kind == sessionCommandGoal {
 		if _, ok := s.provider.(goalProvider); !ok {
-			return errors.New("/goal is available only in Codex Sessions")
+			return "", false, errors.New("/goal is available only in Codex Sessions")
 		}
 	}
 	s.submitMu.Lock()
 	defer s.submitMu.Unlock()
 	if s.idleDrainRequest != nil {
-		return errors.New("Session is idle and is being reclaimed")
+		return "", false, errSessionReclaiming
 	}
 	if s.updateRequest != nil {
-		return errors.New("Session runtime is draining for an update; retry after it reconnects")
+		return "", false, errSessionDraining
 	}
 	if s.providerStopping.Load() {
-		return errors.New("Session provider is restarting; retry after it reconnects")
+		return "", false, errSessionProviderStopped
 	}
 	if err := s.journal.Err(); err != nil {
-		return fmt.Errorf("recording Session message: %w", err)
+		return "", false, fmt.Errorf("recording Session message: %w", err)
 	}
 	if s.pendingTurn != nil {
 		turn := *s.pendingTurn
@@ -1001,7 +1021,7 @@ func (s *Server) submitParsedMessage(text, requestID string, command sessionComm
 			pendingKind = sessionCommandMessage
 		}
 		if command.kind != sessionCommandMessage || pendingKind != sessionCommandMessage {
-			return errors.New("Session already has a pending command or message")
+			return "", false, errSessionPendingCommand
 		}
 		turn.text = mergePendingMessageText(turn.text, text)
 		turn.attachments = append(turn.attachments, attachments...)
@@ -1015,10 +1035,10 @@ func (s *Server) submitParsedMessage(text, requestID string, command sessionComm
 			SessionCommand: false,
 			Attachments:    turn.attachments,
 		}); err != nil {
-			return fmt.Errorf("recording pending Session message: %w", err)
+			return "", false, fmt.Errorf("recording pending Session message: %w", err)
 		}
 		s.pendingTurn = &turn
-		return nil
+		return turn.id, true, nil
 	}
 	turn := turnRequest{
 		id:          fmt.Sprintf("turn-%d", s.nextTurnID.Add(1)),
@@ -1035,12 +1055,12 @@ func (s *Server) submitParsedMessage(text, requestID string, command sessionComm
 		if err := s.appendMessage(Event{Type: EventUserMessage, RequestID: requestID, TurnID: turn.id, Text: turn.text, Revision: turn.revision, SessionCommand: command.kind != sessionCommandMessage, Attachments: turn.attachments}); err != nil {
 			s.pendingTurn = nil
 			s.outstanding--
-			return fmt.Errorf("recording Session message: %w", err)
+			return "", false, fmt.Errorf("recording Session message: %w", err)
 		}
 		close(turn.accepted)
-		return nil
+		return turn.id, false, nil
 	default:
-		return errors.New("Session already has a pending message")
+		return "", false, errSessionPendingMessage
 	}
 }
 
@@ -1183,6 +1203,63 @@ func (s *Server) removePendingMessage(turnID string, expectedRevision int64, req
 		s.signalSessionUpdateReport()
 	}
 	return nil
+}
+
+// removePendingMessageText removes one submission that was merged into the
+// pending turn, removing the whole turn when nothing else remains.
+func (s *Server) removePendingMessageText(turnID, text, requestID string) error {
+	s.submitMu.Lock()
+	if s.pendingTurn == nil || s.pendingTurn.id != turnID {
+		s.submitMu.Unlock()
+		return fmt.Errorf("Session turn %q is no longer pending", turnID)
+	}
+	turn := *s.pendingTurn
+	if turn.revision == 0 {
+		turn.revision = 1
+	}
+	remaining, ok := removeMergedMessageText(turn.text, text)
+	if !ok {
+		s.submitMu.Unlock()
+		return fmt.Errorf("message is no longer part of Session turn %q", turnID)
+	}
+	if strings.TrimSpace(remaining) == "" && len(turn.attachments) == 0 {
+		s.submitMu.Unlock()
+		return s.removePendingMessage(turnID, turn.revision, requestID)
+	}
+	turn.text = remaining
+	turn.revision++
+	if err := s.appendMessage(Event{
+		Type:           EventUserMessageUpdated,
+		RequestID:      requestID,
+		TurnID:         turn.id,
+		Text:           turn.text,
+		Revision:       turn.revision,
+		SessionCommand: turn.command.kind != "" && turn.command.kind != sessionCommandMessage,
+		Attachments:    turn.attachments,
+	}); err != nil {
+		s.submitMu.Unlock()
+		return fmt.Errorf("recording updated Session turn %q: %w", turnID, err)
+	}
+	s.pendingTurn = &turn
+	s.submitMu.Unlock()
+	return nil
+}
+
+// removeMergedMessageText reverses mergePendingMessageText for one part.
+func removeMergedMessageText(current, part string) (string, bool) {
+	const separator = "\n\n"
+	switch {
+	case current == part:
+		return "", true
+	case strings.HasPrefix(current, part+separator):
+		return current[len(part+separator):], true
+	case strings.HasSuffix(current, separator+part):
+		return current[:len(current)-len(separator+part)], true
+	}
+	if index := strings.Index(current, separator+part+separator); index >= 0 {
+		return current[:index] + current[index+len(separator+part):], true
+	}
+	return current, false
 }
 
 func (s *Server) takePendingTurn(turn turnRequest) (turnRequest, bool) {

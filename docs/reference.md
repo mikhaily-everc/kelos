@@ -880,6 +880,40 @@ cookies, or provider credentials. Kubernetes resource operations run as the
 Console ServiceAccount, so Kubernetes resource audit entries identify that
 ServiceAccount; use Console audit events for the human identity.
 
+## SessionMessage
+
+A SessionMessage delivers a user message, an input answer, an interrupt, or a
+pending-message removal to a running Session through the Kubernetes API, without
+Pod exec access or a Console token. The Session runtime watches SessionMessages
+in its namespace and handles those whose `spec.sessionName` names its Session
+and that carry an owner reference to that Session's UID. The spec is immutable.
+
+| Field | Description | Required |
+|-------|-------------|----------|
+| `spec.sessionName` | Session in the same namespace that receives the message | Yes |
+| `spec.type` | `message`, `input`, `interrupt`, or `remove` | Yes |
+| `spec.text` | User message submitted as plain text when `type` is `message`; `!COMMAND` and `/goal` are not interpreted. Max 64 KiB | When `type` is `message` |
+| `spec.inputID` | Pending input request answered when `type` is `input` | When `type` is `input` and `taskRef` is omitted |
+| `spec.answers` | Map of input question IDs to answers when `type` is `input` | When `type` is `input` and `cancel` is not set |
+| `spec.cancel` | Cancel the pending input request instead of answering it | No |
+| `spec.taskRef` | Earlier SessionMessage of type `message`: `input` answers its pending input request, `interrupt` interrupts its turn only while it runs, and `remove` removes it from the pending turn | When `type` is `remove` |
+| `status.phase` | `Pending`, `Accepted`, `Working`, `InputRequired`, `Completed`, `Failed`, `Canceled`, or `Rejected`; empty means `Pending` | Output |
+| `status.podUID` / `status.requestID` / `status.turnID` | Session Pod, runtime request, and Session turn that processed the message | Output |
+| `status.mergedInto` | SessionMessage whose pending turn this message was appended to | Output |
+| `status.input` | Pending input request (`id`, `questions`) while `phase` is `InputRequired` | Output |
+| `status.result` | Final assistant message of the turn, truncated to 16384 characters (`truncated` is set when shortened) | Output |
+| `status.reason` / `status.message` | Explanation for `Failed`, `Canceled`, and `Rejected` | Output |
+| `status.acceptedAt` / `status.completedAt` | When the runtime accepted the message and when it reached a terminal phase | Output |
+
+Messages are delivered in name order. A message submitted while a turn is
+pending is appended to that turn, like a Console follow-up, and reports the
+first message of the turn in `status.mergedInto`. While the runtime drains for
+an update or idle reclamation, or while a pending command blocks the next
+message, messages stay `Pending` and the next runtime delivers them. Control
+messages (`input`, `interrupt`, `remove`) finish as `Completed` or `Rejected`;
+a removed message becomes `Canceled` with reason `Removed`. When a runtime
+restarts while a message's turn is running, the message becomes `Failed` with
+reason `PodLost`.
 
 ## SessionSpawner
 
