@@ -119,6 +119,8 @@ func isSessionInputUnavailable(err error) bool {
 
 // +kubebuilder:rbac:groups=kelos.dev,resources=sessions,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=kelos.dev,resources=sessions/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=kelos.dev,resources=sessionmessages,verbs=get;list;watch
+// +kubebuilder:rbac:groups=kelos.dev,resources=sessionmessages/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kelos.dev,resources=workspaces;agentconfigs,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;delete;patch

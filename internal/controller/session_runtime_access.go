@@ -100,6 +100,19 @@ func sessionRuntimeRole(session *kelos.Session) *rbacv1.Role {
 				ResourceNames: []string{session.Name},
 				Verbs:         []string{"patch"},
 			},
+			// SessionMessage names are chosen by clients, so list and watch cannot
+			// be scoped by resourceNames; the runtime filters by spec.sessionName
+			// and owner UID.
+			{
+				APIGroups: []string{kelos.GroupVersion.Group},
+				Resources: []string{"sessionmessages"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{kelos.GroupVersion.Group},
+				Resources: []string{"sessionmessages/status"},
+				Verbs:     []string{"patch", "update"},
+			},
 		},
 	}
 }

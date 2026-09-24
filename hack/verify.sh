@@ -19,6 +19,7 @@ GENERATED_FILES=(
   internal/manifests/install-crd.yaml
   internal/manifests/charts/kelos/charts/kelos-crds/templates/agentconfig-crd.yaml
   internal/manifests/charts/kelos/charts/kelos-crds/templates/session-crd.yaml
+  internal/manifests/charts/kelos/charts/kelos-crds/templates/sessionmessage-crd.yaml
   internal/manifests/charts/kelos/charts/kelos-crds/templates/sessionspawner-crd.yaml
   internal/manifests/charts/kelos/charts/kelos-crds/templates/taskbudget-crd.yaml
   internal/manifests/charts/kelos/charts/kelos-crds/templates/task-crd.yaml

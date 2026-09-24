@@ -136,11 +136,12 @@ func runServe() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	sessionClient, sessionName, podUID, err := sessionClientFromEnvironment()
+	apiClient, namespace, sessionName, podUID, err := sessionClientFromEnvironment()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
 		os.Exit(1)
 	}
+	sessionClient := apiClient.Sessions(namespace)
 	publisher, err := sessionruntime.NewSessionStatusPublisher(sessionClient, sessionName, podUID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid configuration: %v\n", err)
@@ -163,8 +164,10 @@ func runServe() {
 		Environment:          os.Environ(),
 		PublishSessionStatus: publisher,
 		SessionName:          sessionName,
+		SessionUID:           session.UID,
 		PodUID:               podUID,
 		SessionClient:        sessionClient,
+		SessionMessageClient: apiClient.SessionMessages(namespace),
 	}
 	if err := sessionruntime.Run(ctx, config); err != nil {
 		fmt.Fprintf(os.Stderr, "Session runtime failed: %v\n", err)
@@ -172,22 +175,22 @@ func runServe() {
 	}
 }
 
-func sessionClientFromEnvironment() (clientv1alpha2.SessionInterface, string, types.UID, error) {
+func sessionClientFromEnvironment() (clientv1alpha2.ApiV1alpha2Interface, string, string, types.UID, error) {
 	sessionName := os.Getenv("KELOS_SESSION_NAME")
 	namespace := os.Getenv("KELOS_SESSION_NAMESPACE")
 	podUID := types.UID(os.Getenv("KELOS_SESSION_POD_UID"))
 	if sessionName == "" || namespace == "" || podUID == "" {
-		return nil, "", "", fmt.Errorf("KELOS_SESSION_NAME, KELOS_SESSION_NAMESPACE, and KELOS_SESSION_POD_UID must be set")
+		return nil, "", "", "", fmt.Errorf("KELOS_SESSION_NAME, KELOS_SESSION_NAMESPACE, and KELOS_SESSION_POD_UID must be set")
 	}
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, "", "", fmt.Errorf("loading in-cluster Kubernetes configuration: %w", err)
+		return nil, "", "", "", fmt.Errorf("loading in-cluster Kubernetes configuration: %w", err)
 	}
 	client, err := clientset.NewForConfig(config)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("creating Kubernetes client: %w", err)
+		return nil, "", "", "", fmt.Errorf("creating Kubernetes client: %w", err)
 	}
-	return client.ApiV1alpha2().Sessions(namespace), sessionName, podUID, nil
+	return client.ApiV1alpha2(), namespace, sessionName, podUID, nil
 }
 
 func runHealth() {
