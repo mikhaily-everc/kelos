@@ -72,6 +72,16 @@ func TestEnsureSessionRuntimeAccess(t *testing.T) {
 					ResourceNames: []string{session.Name},
 					Verbs:         []string{"patch"},
 				},
+				{
+					APIGroups: []string{kelos.GroupVersion.Group},
+					Resources: []string{"sessionmessages"},
+					Verbs:     []string{"get", "list", "watch"},
+				},
+				{
+					APIGroups: []string{kelos.GroupVersion.Group},
+					Resources: []string{"sessionmessages/status"},
+					Verbs:     []string{"patch", "update"},
+				},
 			}
 			if !reflect.DeepEqual(role.Rules, wantRules) {
 				t.Fatalf("Session runtime Role rules = %#v, want %#v", role.Rules, wantRules)
