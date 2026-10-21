@@ -181,7 +181,9 @@ func (g *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Info("WARNING: accepting generic webhook without signature verification", "deliveryID", deliveryID)
 	}
 
-	if deliveryID != "" && g.deliveryCache.CheckAndMark(deliveryID) {
+	// GitHub sends one X-GitHub-Delivery to every subscribed webhook, so the cache is per gateway.
+	cacheKey := gatewayFallbackDeliveryID(namespace, name, deliveryID)
+	if deliveryID != "" && g.deliveryCache.CheckAndMark(cacheKey) {
 		log.Info("Duplicate webhook delivery, returning cached response", "eventType", eventType, "deliveryID", deliveryID)
 		w.WriteHeader(http.StatusOK)
 		return
@@ -190,7 +192,7 @@ func (g *GatewayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if deliveryID != "" {
 		defer func() {
 			if !deliverySucceeded {
-				g.deliveryCache.Forget(deliveryID)
+				g.deliveryCache.Forget(cacheKey)
 			}
 		}()
 	}

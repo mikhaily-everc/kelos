@@ -255,6 +255,42 @@ func TestGatewayServeHTTP_HeaderlessFallbackDeliveryIDsAreGatewayScoped(t *testi
 	}
 }
 
+// GitHub sends one X-GitHub-Delivery to every webhook subscribed to the event.
+func TestGatewayServeHTTP_HeaderDeliveryIDsAreGatewayScoped(t *testing.T) {
+	g := newTestGatewayHandler(t,
+		hmacSecret("webhook-secret", "default", testSecret),
+		githubGateway("first", "default", "webhook-secret"),
+		githubSpawner("first-spawner", "default", "first"),
+		githubGateway("second", "default", "webhook-secret"),
+		githubSpawner("second-spawner", "default", "second"),
+	)
+
+	body := []byte(issuesPayload)
+	for _, name := range []string{"first", "second", "second"} {
+		req := httptest.NewRequest(http.MethodPost, "/webhook/default/"+name, bytes.NewReader(body))
+		req.Header.Set(GitHubEventHeader, "issues")
+		req.Header.Set(GitHubDeliveryHeader, "shared-delivery")
+		req.Header.Set(GitHubSignatureHeader, signPayload(body, []byte(testSecret)))
+		rr := httptest.NewRecorder()
+		g.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("gateway %s returned %d, want 200", name, rr.Code)
+		}
+	}
+
+	var tasks kelos.TaskList
+	if err := g.client.List(context.Background(), &tasks, client.InNamespace("default")); err != nil {
+		t.Fatal(err)
+	}
+	spawners := map[string]int{}
+	for _, task := range tasks.Items {
+		spawners[task.Labels["kelos.dev/taskspawner"]]++
+	}
+	if spawners["first-spawner"] != 1 || spawners["second-spawner"] != 1 || len(tasks.Items) != 2 {
+		t.Fatalf("Tasks per spawner = %v, want one each: the second gateway's copy is not a duplicate, its redelivery is", spawners)
+	}
+}
+
 func TestGatewayServeHTTP_GitHubInvalidSignature401(t *testing.T) {
 	g := newTestGatewayHandler(t,
 		githubGateway("gh", "default", "gh-secret"),
