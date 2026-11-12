@@ -136,6 +136,7 @@ func main() {
 	flag.StringVar(&workerRunnerImage, "worker-runner-image", controller.WorkerRunnerImageRepository, "The image repository or tagged image to use for worker-runner containers in WorkerPool StatefulSets.")
 	flag.StringVar(&workerRunnerImagePullPolicy, "worker-runner-image-pull-policy", "", "The image pull policy for worker-runner containers (e.g., Always, Never, IfNotPresent).")
 	flag.StringVar(&sessionRuntimeImage, "session-runtime-image", controller.SessionRuntimeImageRepository, "The image repository or tagged image used to inject the runtime into Session Pods.")
+	flag.DurationVar(&controller.TaskRecordTTL, "task-record-ttl", controller.TaskRecordTTL, "Retention for TaskRecords, also applied as a ceiling to existing ones. Must cover the longest TaskBudget period.")
 	flag.StringVar(&sessionRuntimeImagePullPolicy, "session-runtime-image-pull-policy", "", "The image pull policy for the Session runtime image (e.g., Always, Never, IfNotPresent).")
 
 	opts, applyVerbosity := logging.SetupZapOptions(flag.CommandLine)
@@ -363,6 +364,7 @@ func main() {
 	if err = (&controller.TaskRecordReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		MaxTTL: controller.TaskRecordTTL,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TaskRecord")
 		os.Exit(1)

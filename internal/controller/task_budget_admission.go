@@ -524,7 +524,7 @@ func (e *budgetEnforcer) createTaskRecord(ctx context.Context, task *kelos.Task)
 		return err
 	}
 
-	ttl := defaultTaskRecordTTL
+	ttl := int32(TaskRecordTTL / time.Second)
 	record := &kelos.TaskRecord{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      string(task.UID),

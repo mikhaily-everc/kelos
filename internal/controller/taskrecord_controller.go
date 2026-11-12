@@ -21,6 +21,10 @@ type TaskRecordReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// MaxTTL caps every record's TTL, so lowering --task-record-ttl also reclaims older records.
+	// Zero means no cap.
+	MaxTTL time.Duration
+
 	// NowFunc returns the current time. Defaults to time.Now.
 	// Overridable in tests for deterministic behavior.
 	NowFunc func() time.Time
@@ -57,7 +61,11 @@ func (r *TaskRecordReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	expiry := record.Spec.CompletionTime.Add(time.Duration(*record.Spec.TTLSecondsAfterCompletion) * time.Second)
+	ttl := time.Duration(*record.Spec.TTLSecondsAfterCompletion) * time.Second
+	if r.MaxTTL > 0 && ttl > r.MaxTTL {
+		ttl = r.MaxTTL
+	}
+	expiry := record.Spec.CompletionTime.Add(ttl)
 	remaining := expiry.Sub(r.now())
 	if remaining > 0 {
 		return ctrl.Result{RequeueAfter: remaining}, nil

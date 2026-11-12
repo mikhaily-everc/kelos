@@ -102,6 +102,50 @@ func TestTaskRecordReconciler_GC(t *testing.T) {
 	}
 }
 
+func TestTaskRecordReconciler_MaxTTLCapsExistingRecords(t *testing.T) {
+	scheme := newWorkerPoolTestScheme()
+	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
+	thirtyDays := int32(30 * 24 * 60 * 60)
+
+	stale := &kelos.TaskRecord{
+		ObjectMeta: metav1.ObjectMeta{Name: "stale", Namespace: "default"},
+		Spec: kelos.TaskRecordSpec{
+			TaskRef:                   kelos.TaskReference{Name: "t1", UID: "u1"},
+			Phase:                     kelos.TaskPhaseSucceeded,
+			CompletionTime:            nowTime(now.Add(-8 * 24 * time.Hour)),
+			TTLSecondsAfterCompletion: &thirtyDays,
+		},
+	}
+	recent := &kelos.TaskRecord{
+		ObjectMeta: metav1.ObjectMeta{Name: "recent", Namespace: "default"},
+		Spec: kelos.TaskRecordSpec{
+			TaskRef:                   kelos.TaskReference{Name: "t2", UID: "u2"},
+			Phase:                     kelos.TaskPhaseSucceeded,
+			CompletionTime:            nowTime(now.Add(-6 * 24 * time.Hour)),
+			TTLSecondsAfterCompletion: &thirtyDays,
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stale, recent).Build()
+	r := &TaskRecordReconciler{Client: cl, Scheme: scheme, MaxTTL: 7 * 24 * time.Hour, NowFunc: func() time.Time { return now }}
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "stale", Namespace: "default"}}); err != nil {
+		t.Fatalf("Reconcile(stale) error: %v", err)
+	}
+	var got kelos.TaskRecord
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "stale", Namespace: "default"}, &got); !apierrors.IsNotFound(err) {
+		t.Errorf("stale record past MaxTTL not deleted, err = %v", err)
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "recent", Namespace: "default"}})
+	if err != nil {
+		t.Fatalf("Reconcile(recent) error: %v", err)
+	}
+	if res.RequeueAfter <= 23*time.Hour || res.RequeueAfter > 25*time.Hour {
+		t.Errorf("recent: RequeueAfter = %v, want ~24h (capped by MaxTTL)", res.RequeueAfter)
+	}
+}
+
 func TestTaskBudgetReconciler_RefreshesUsed(t *testing.T) {
 	scheme := newWorkerPoolTestScheme()
 	now := time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)

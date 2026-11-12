@@ -1352,11 +1352,9 @@ func usageFromResults(results map[string]string) *kelos.TaskUsage {
 	return &usage
 }
 
-const (
-	// defaultTaskRecordTTL is the default retention period for TaskRecords
-	// (30 days). Records older than this are garbage-collected.
-	defaultTaskRecordTTL int32 = 30 * 24 * 60 * 60
-)
+// TaskRecordTTL is the retention stamped on new TaskRecords and the ceiling the TaskRecord GC
+// applies to existing ones. Set from --task-record-ttl; it must cover the longest TaskBudget period.
+var TaskRecordTTL = 7 * 24 * time.Hour
 
 // now returns the current time, using NowFunc if set for testability.
 func (r *TaskReconciler) now() time.Time {
