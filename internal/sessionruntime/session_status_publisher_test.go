@@ -2,12 +2,18 @@ package sessionruntime
 
 import (
 	"context"
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/apimachinery/pkg/types"
 
 	kelos "github.com/kelos-dev/kelos/api/v1alpha2"
@@ -238,6 +244,32 @@ func TestSessionStatusPublisherPreservesWorkspaceStatusWhenUnobserved(t *testing
 	}
 }
 
+func TestSessionStatusPublisherNamesConcurrentSessionWrite(t *testing.T) {
+	const sessionName = "chat"
+	podUID := types.UID("live-pod")
+	clientset := clientfake.NewSimpleClientset(&kelos.Session{
+		ObjectMeta: metav1.ObjectMeta{Name: sessionName, Namespace: "default", ResourceVersion: "1"},
+		Status:     kelos.SessionStatus{Phase: kelos.SessionPhaseReady, PodUID: podUID},
+	})
+	clientset.PrependReactor("patch", "sessions", func(clienttesting.Action) (bool, runtime.Object, error) {
+		raced := &kelos.Session{
+			ObjectMeta: metav1.ObjectMeta{Name: sessionName, Namespace: "default", ResourceVersion: "2"},
+			Status:     kelos.SessionStatus{Phase: kelos.SessionPhaseReady, PodUID: podUID},
+		}
+		if err := clientset.Tracker().Update(kelos.GroupVersion.WithResource("sessions"), raced, "default"); err != nil {
+			t.Fatal(err)
+		}
+		return true, nil, apierrors.NewGenericServerResponse(http.StatusUnprocessableEntity, "patch", schema.GroupResource{}, sessionName, "", 0, false)
+	})
+	publisher, err := NewSessionStatusPublisher(clientset.ApiV1alpha2().Sessions("default"), sessionName, podUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher(context.Background(), ObservedSessionStatus{Active: true}); err == nil || !strings.Contains(err.Error(), "resourceVersion 1 to 2") {
+		t.Fatalf("publisher error = %v, want the concurrent write named", err)
+	}
+}
+
 func TestSessionStatusPublisherRequiresLiveReadyPod(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -264,8 +296,8 @@ func TestSessionStatusPublisherRequiresLiveReadyPod(t *testing.T) {
 			if err := publisher(context.Background(), ObservedSessionStatus{
 				Active:          true,
 				WorkspaceStatus: &WorkspaceStatus{Branch: "stale"},
-			}); err == nil {
-				t.Fatal("publisher error = nil, want status patch rejection")
+			}); err == nil || !strings.Contains(err.Error(), "not Ready on Pod") {
+				t.Fatalf("publisher error = %v, want the Ready/Pod mismatch named", err)
 			}
 			got, err := clientset.ApiV1alpha2().Sessions("default").Get(context.Background(), sessionName, metav1.GetOptions{})
 			if err != nil {
