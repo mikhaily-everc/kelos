@@ -3900,6 +3900,59 @@ func TestSetSessionIdleDrainRequestClearsStaleReport(t *testing.T) {
 	}
 }
 
+func TestSessionReconcileKeepsActiveRuntimeWhenIdleResumeRequestExpires(t *testing.T) {
+	cl, reconciler, request := newReadyIdleSessionFixture(t,
+		&kelos.SessionIdlePolicy{SuspendAfterSeconds: ptr.To(int32(3600))},
+		time.Now().Add(-2*time.Hour))
+
+	var session kelos.Session
+	if err := cl.Get(context.Background(), request.NamespacedName, &session); err != nil {
+		t.Fatal(err)
+	}
+	session.Status.Phase = kelos.SessionPhaseReady
+	apiMeta.SetStatusCondition(&session.Status.Conditions, metav1.Condition{
+		Type:   kelos.SessionConditionActive,
+		Status: metav1.ConditionTrue,
+		Reason: "WaitingForInput",
+	})
+	if err := cl.Status().Update(context.Background(), &session); err != nil {
+		t.Fatal(err)
+	}
+	drain, err := sessionupdate.Encode(sessionupdate.Request{ID: "stuck-drain", PodUID: types.UID("pod-uid")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := sessionupdate.EncodeReport(sessionupdate.Report{RequestID: "stuck-drain", PodUID: types.UID("pod-uid"), Phase: sessionupdate.PhaseDraining})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Annotations = map[string]string{
+		sessionsuspend.ResumeRequestAnnotation:     "expired-request",
+		sessionsuspend.ResumeRequestTimeAnnotation: time.Now().Add(-idleResumeRequestTimeout - time.Minute).UTC().Format(time.RFC3339Nano),
+		sessionupdate.IdleDrainRequestAnnotation:   drain,
+		sessionupdate.IdleDrainReportAnnotation:    report,
+	}
+	if err := cl.Update(context.Background(), &session); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if err := cl.Get(context.Background(), request.NamespacedName, &session); err != nil {
+		t.Fatal(err)
+	}
+	if sessionsuspend.ResumeRequested(&session) {
+		t.Fatalf("expired resume request was kept: %#v", session.Annotations)
+	}
+	if session.Annotations[sessionupdate.IdleDrainRequestAnnotation] != "" || session.Annotations[sessionupdate.IdleDrainReportAnnotation] != "" {
+		t.Fatalf("idle drain was left installed on an active runtime: %#v", session.Annotations)
+	}
+	if sessionsuspend.IsIdlePolicySuspended(&session) {
+		t.Fatalf("active Session was suspended: %#v", session.Status)
+	}
+}
+
 func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
 	for i := range volumes {
 		if volumes[i].Name == name {
