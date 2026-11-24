@@ -41,6 +41,10 @@ func NewSessionStatusPublisher(client clientv1alpha2.SessionInterface, sessionNa
 		if err != nil {
 			return fmt.Errorf("getting Session %q before publishing runtime status: %w", sessionName, err)
 		}
+		if session.Status.Phase != kelos.SessionPhaseReady || session.Status.PodUID != podUID {
+			return fmt.Errorf("Session %q is %q on Pod %q, not Ready on Pod %q; runtime status not published yet",
+				sessionName, session.Status.Phase, session.Status.PodUID, podUID)
+		}
 		conditionStatus := metav1.ConditionFalse
 		reason := "Idle"
 		message := "Session runtime is idle"
@@ -99,8 +103,19 @@ func NewSessionStatusPublisher(client clientv1alpha2.SessionInterface, sessionNa
 			return fmt.Errorf("encoding Session runtime status patch: %w", err)
 		}
 		if _, err := client.Patch(ctx, sessionName, types.JSONPatchType, patch, metav1.PatchOptions{}, "status"); err != nil {
-			return fmt.Errorf("publishing Session %q runtime status: %w", sessionName, err)
+			return fmt.Errorf("publishing Session %q runtime status: %w%s", sessionName, err,
+				concurrentWrite(ctx, client, session))
 		}
 		return nil
 	}, nil
+}
+
+// concurrentWrite: a failed JSON-patch test op is a bare 422 (no op named), so re-read to tell a race.
+func concurrentWrite(ctx context.Context, client clientv1alpha2.SessionInterface, read *kelos.Session) string {
+	latest, err := client.Get(ctx, read.Name, metav1.GetOptions{})
+	if err != nil || latest.ResourceVersion == read.ResourceVersion {
+		return ""
+	}
+	return fmt.Sprintf(" (Session changed from resourceVersion %s to %s while publishing; retrying)",
+		read.ResourceVersion, latest.ResourceVersion)
 }
