@@ -453,6 +453,17 @@ func (r *SessionReconciler) expireSessionIdleResumeRequest(
 		if pod.DeletionTimestamp != nil {
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
+		if sessionRuntimeActive(session, &pod) {
+			// Draining an Active runtime deadlocks: it refuses the messages that would finish its work.
+			if err := r.clearSessionIdleDrainRequest(ctx, session); err != nil {
+				return ctrl.Result{}, err
+			}
+			if err := r.clearSessionIdleResumeRequest(ctx, session); err != nil {
+				return ctrl.Result{}, err
+			}
+			log.FromContext(ctx).Info("Kept active Session running after its idle resume request expired", "session", session.Name)
+			return ctrl.Result{Requeue: true}, nil
+		}
 		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodUnknown {
 			drained, err := r.ensureSessionIdleDrained(
 				ctx,
@@ -1990,6 +2001,15 @@ func sessionIdleSince(session *kelos.Session) time.Time {
 		since = last.Time
 	}
 	return since
+}
+
+// sessionRuntimeActive: Active=True counts only if published by this Pod, not a predecessor.
+func sessionRuntimeActive(session *kelos.Session, pod *corev1.Pod) bool {
+	if session.Status.PodUID != pod.UID || pod.DeletionTimestamp != nil {
+		return false
+	}
+	active := apiMeta.FindStatusCondition(session.Status.Conditions, kelos.SessionConditionActive)
+	return active != nil && active.Status == metav1.ConditionTrue
 }
 
 // installedSessionIdleDrainRequest returns the idle-drain request already
