@@ -86,7 +86,7 @@ type goalProvider interface {
 func NewProvider(ctx context.Context, config ProviderConfig) (Provider, error) {
 	switch config.AgentType {
 	case "claude-code":
-		return NewClaudeProvider(ctx, config)
+		return NewFailoverClaudeProvider(ctx, config)
 	case "codex":
 		return NewCodexProvider(ctx, config)
 	case "opencode":

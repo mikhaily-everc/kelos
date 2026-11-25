@@ -103,6 +103,9 @@ func NewClaudeProvider(ctx context.Context, config ProviderConfig) (*ClaudeProvi
 	providerCtx, cancel := context.WithCancel(ctx)
 	command := exec.CommandContext(providerCtx, "claude", args...)
 	command.Dir = config.WorkingDir
+	if len(config.Environment) > 0 {
+		command.Env = config.Environment
+	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		cancel()
