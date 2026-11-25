@@ -243,6 +243,11 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
+	if idleSuspended && session.DeletionTimestamp == nil {
+		if resumed, err := r.resumeForPendingMessages(ctx, &session); err != nil || resumed {
+			return ctrl.Result{Requeue: resumed}, err
+		}
+	}
 	if statefulSetMissing {
 		// Reap an already-idle Session whose workload is gone rather than
 		// recreating it just to delete it later. A missing StatefulSet does not
@@ -422,7 +427,18 @@ func (r *SessionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		}
 		suspendExpired, suspendRemaining := sessionIdleSuspendExpired(&session)
 		if suspendExpired {
-			return r.reconcileIdleSuspend(ctx, &session, &statefulSet, &pod)
+			pending, err := r.sessionHasPendingMessages(ctx, &session)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if !pending {
+				return r.reconcileIdleSuspend(ctx, &session, &statefulSet, &pod)
+			}
+			// A draining runtime refuses messages, and a suspended one is never woken by them.
+			if err := r.clearSessionIdleDrainRequest(ctx, &session); err != nil {
+				return ctrl.Result{}, err
+			}
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		// No idle action is due. Cancel any pending drain so the runtime resumes
 		// accepting turns after activity or a resume request.
@@ -2001,6 +2017,44 @@ func sessionIdleSince(session *kelos.Session) time.Time {
 		since = last.Time
 	}
 	return since
+}
+
+// sessionHasPendingMessages: a message for the Session has not been delivered yet.
+func (r *SessionReconciler) sessionHasPendingMessages(ctx context.Context, session *kelos.Session) (bool, error) {
+	var messages kelos.SessionMessageList
+	if err := r.List(ctx, &messages, client.InNamespace(session.Namespace)); err != nil {
+		return false, fmt.Errorf("listing SessionMessages for Session %q: %w", session.Name, err)
+	}
+	for i := range messages.Items {
+		message := &messages.Items[i]
+		if message.Spec.SessionName != session.Name || message.Spec.Type != kelos.SessionMessageTypeMessage || message.DeletionTimestamp != nil {
+			continue
+		}
+		if phase := message.Status.Phase; phase == "" || phase == kelos.SessionMessagePhasePending {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resumeForPendingMessages wakes an idle-suspended Session and acks it to restart the idle clock.
+func (r *SessionReconciler) resumeForPendingMessages(ctx context.Context, session *kelos.Session) (bool, error) {
+	if sessionsuspend.ResumeRequested(session) {
+		return false, nil
+	}
+	pending, err := r.sessionHasPendingMessages(ctx, session)
+	if err != nil || !pending {
+		return false, err
+	}
+	key := client.ObjectKeyFromObject(session)
+	resumed, requested, err := sessionsuspend.RequestResume(ctx, r.Client, key)
+	if err != nil || !requested {
+		return false, err
+	}
+	if _, err := sessionsuspend.AcknowledgeResume(ctx, r.Client, key, resumed.Annotations[sessionsuspend.ResumeRequestAnnotation]); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // sessionRuntimeActive: Active=True counts only if published by this Pod, not a predecessor.
