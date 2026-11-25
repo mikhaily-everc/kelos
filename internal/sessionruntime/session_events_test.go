@@ -84,9 +84,12 @@ func TestServerBackgroundTasksOnlyBlockIdleDrain(t *testing.T) {
 		name             string
 		outstanding      int
 		backgroundActive bool
+		pendingInputs    int64
 		updatePhase      sessionupdate.Phase
 		idlePhase        sessionupdate.Phase
 	}{
+		{name: "turn waiting for input", outstanding: 1, pendingInputs: 1, updatePhase: sessionupdate.PhaseDrained, idlePhase: sessionupdate.PhaseDraining},
+		{name: "input wait with a queued turn", outstanding: 2, pendingInputs: 1, updatePhase: sessionupdate.PhaseDraining, idlePhase: sessionupdate.PhaseDraining},
 		{name: "idle", updatePhase: sessionupdate.PhaseDrained, idlePhase: sessionupdate.PhaseDrained},
 		{name: "turn", outstanding: 1, updatePhase: sessionupdate.PhaseDraining, idlePhase: sessionupdate.PhaseDraining},
 		{name: "background task", backgroundActive: true, updatePhase: sessionupdate.PhaseDrained, idlePhase: sessionupdate.PhaseDraining},
@@ -99,6 +102,7 @@ func TestServerBackgroundTasksOnlyBlockIdleDrain(t *testing.T) {
 			server.updateRequest = &sessionupdate.Request{ID: "runtime-update"}
 			server.idleDrainRequest = &sessionupdate.Request{ID: "idle-drain"}
 			server.outstanding = test.outstanding
+			server.pendingInputCount.Store(test.pendingInputs)
 			if test.backgroundActive {
 				server.events.Emit(Event{Type: EventRuntimeStatus, Runtime: &RuntimeStatus{BackgroundTasks: ptr.To(1)}})
 			}

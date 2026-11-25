@@ -456,8 +456,8 @@ func TestSessionMessageRelayRecoversAcrossRuntimeRestart(t *testing.T) {
 	if status := h.status("a-done"); status.Phase != kelos.SessionMessagePhaseCompleted || status.PodUID != "pod-old" || status.Result == nil || status.Result.Text != "finished before restart" {
 		t.Fatalf("finished message status = %#v", status)
 	}
-	if status := h.status("b-working"); status.Phase != kelos.SessionMessagePhaseFailed || status.Reason != kelos.SessionMessageReasonPodLost {
-		t.Fatalf("interrupted message status = %#v", status)
+	if status := h.status("b-working"); status.Phase != kelos.SessionMessagePhaseAccepted || status.RequestID != "sessionmessage-b-working-uid-retry" || status.Reason != "" {
+		t.Fatalf("interrupted message was not retried: %#v", status)
 	}
 	if status := h.status("c-unwritten"); status.Phase != kelos.SessionMessagePhaseAccepted || status.TurnID != "turn-3" || status.PodUID != testSessionMessagePodUID {
 		t.Fatalf("adopted message status = %#v", status)
@@ -471,7 +471,7 @@ func TestSessionMessageRelayRecoversAcrossRuntimeRestart(t *testing.T) {
 
 	h.runPendingTurn()
 	h.sync()
-	for _, name := range []string{"c-unwritten", "d-lost"} {
+	for _, name := range []string{"b-working", "c-unwritten", "d-lost"} {
 		if status := h.status(name); status.Phase != kelos.SessionMessagePhaseCompleted {
 			t.Fatalf("SessionMessage %q status = %#v", name, status)
 		}
@@ -479,8 +479,46 @@ func TestSessionMessageRelayRecoversAcrossRuntimeRestart(t *testing.T) {
 	provider.mu.Lock()
 	prompts := append([]string(nil), provider.prompts...)
 	provider.mu.Unlock()
-	if len(prompts) != 1 || prompts[0] != "unwritten\n\nd-lost" {
+	if len(prompts) != 1 || prompts[0] != "unwritten\n\nb-working\n\nd-lost" {
 		t.Fatalf("provider prompts = %q", prompts)
+	}
+}
+
+func TestSessionMessageRelayFailsMessageInterruptedAfterItsRetry(t *testing.T) {
+	path := t.TempDir() + "/events.jsonl"
+	journal, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []Event{
+		{Type: EventUserMessage, RequestID: "sessionmessage-b-retried-uid-retry", TurnID: "turn-2", Text: "retried", Revision: 1},
+		{Type: EventTurnStarted, TurnID: "turn-2", Status: "running"},
+	} {
+		if err := journal.Append(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	journal.Close()
+	journal, err = OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := recoverJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := testSessionMessage("b-retried", kelos.SessionMessageSpec{Type: kelos.SessionMessageTypeMessage, Text: "retried"})
+	now := metav1.Now()
+	message.Status = kelos.SessionMessageStatus{Phase: kelos.SessionMessagePhaseWorking, PodUID: "pod-old", RequestID: "sessionmessage-b-retried-uid-retry", TurnID: "turn-2", AcceptedAt: &now}
+	h := newSessionMessageHarness(t, journal, &fakeProvider{}, message)
+	if err := h.server.restoreTurn(recovery.pendingTurn); err != nil {
+		t.Fatal(err)
+	}
+	h.server.nextTurnID.Store(recovery.nextTurnID)
+	h.sync()
+
+	if status := h.status("b-retried"); status.Phase != kelos.SessionMessagePhaseFailed || status.Reason != kelos.SessionMessageReasonPodLost {
+		t.Fatalf("a second interruption must fail the message, got %#v", status)
 	}
 }
 

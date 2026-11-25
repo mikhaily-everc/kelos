@@ -3953,6 +3953,63 @@ func TestSessionReconcileKeepsActiveRuntimeWhenIdleResumeRequestExpires(t *testi
 	}
 }
 
+func pendingSessionMessage(session string) *kelos.SessionMessage {
+	return &kelos.SessionMessage{
+		ObjectMeta: metav1.ObjectMeta{Name: "m-pending", Namespace: "default"},
+		Spec:       kelos.SessionMessageSpec{SessionName: session, Type: kelos.SessionMessageTypeMessage, Text: "hello"},
+	}
+}
+
+func TestSessionReconcileDoesNotSuspendIdleSessionWithPendingMessage(t *testing.T) {
+	cl, reconciler, request := newReadyIdleSessionFixture(t,
+		&kelos.SessionIdlePolicy{SuspendAfterSeconds: ptr.To(int32(30))},
+		time.Now().Add(-time.Hour))
+	if err := cl.Create(context.Background(), pendingSessionMessage("idle-chat")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	var session kelos.Session
+	if err := cl.Get(context.Background(), request.NamespacedName, &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Annotations[sessionupdate.IdleDrainRequestAnnotation] != "" {
+		t.Fatalf("idle drain installed while a message was pending: %#v", session.Annotations)
+	}
+}
+
+func TestSessionReconcileResumesIdleSuspendedSessionForPendingMessage(t *testing.T) {
+	scheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{appsv1.AddToScheme, corev1.AddToScheme, kelos.AddToScheme} {
+		if err := add(scheme); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session := newIdleSuspendedSession("idle-chat", &kelos.SessionIdlePolicy{SuspendAfterSeconds: ptr.To(int32(30))}, time.Now().Add(-time.Hour))
+	statefulSet := testSessionStatefulSet(session)
+	statefulSet.Spec.Replicas = ptr.To(int32(0))
+	cl := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&kelos.Session{}, &appsv1.StatefulSet{}).
+		WithObjects(session, statefulSet, pendingSessionMessage("idle-chat")).
+		Build()
+	reconciler := testSessionReconciler(cl, scheme)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(session)}
+
+	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	var current kelos.Session
+	if err := cl.Get(context.Background(), request.NamespacedName, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !sessionsuspend.ResumeRequested(&current) || !sessionsuspend.ResumeAcknowledged(&current) {
+		t.Fatalf("pending message did not wake the Session: %#v", current.Annotations)
+	}
+}
+
 func findVolume(volumes []corev1.Volume, name string) *corev1.Volume {
 	for i := range volumes {
 		if volumes[i].Name == name {

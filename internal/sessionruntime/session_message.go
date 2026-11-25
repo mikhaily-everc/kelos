@@ -23,6 +23,7 @@ import (
 
 const (
 	sessionMessageRequestPrefix     = "sessionmessage-"
+	sessionMessageRetrySuffix       = "-retry"
 	sessionMessageResyncInterval    = 10 * time.Second
 	maxSessionMessageResultRunes    = 16384
 	maxSessionMessageResultBytes    = 4 * maxSessionMessageResultRunes
@@ -86,7 +87,8 @@ type sessionMessageRelay struct {
 	tracked     map[string]*trackedSessionMessage
 	handled     map[types.UID]struct{}
 	redeliver   map[types.UID]struct{}
-	turns       map[string]*sessionMessageTurn
+	retried     map[types.UID]struct{}
+	turns      map[string]*sessionMessageTurn
 	inputs      map[string]string
 	requests    map[string]sessionMessageRequest
 	merged      []string
@@ -105,6 +107,7 @@ func newSessionMessageRelay(server *Server, client clientv1alpha2.SessionMessage
 		tracked:    map[string]*trackedSessionMessage{},
 		handled:    map[types.UID]struct{}{},
 		redeliver:  map[types.UID]struct{}{},
+		retried:    map[types.UID]struct{}{},
 		turns:      map[string]*sessionMessageTurn{},
 		inputs:     map[string]string{},
 		requests:   map[string]sessionMessageRequest{},
@@ -341,6 +344,14 @@ func sessionMessageRequestID(message *kelos.SessionMessage) string {
 	return sessionMessageRequestPrefix + string(message.UID)
 }
 
+// requestID: the one retry after a lost turn gets its own ID, so the journal never maps it back.
+func (r *sessionMessageRelay) requestID(message *kelos.SessionMessage) string {
+	if _, retried := r.retried[message.UID]; retried {
+		return sessionMessageRequestID(message) + sessionMessageRetrySuffix
+	}
+	return sessionMessageRequestID(message)
+}
+
 // recover restores tracking for messages accepted before this process started
 // and replays the retained journal to bring their status up to date.
 func (r *sessionMessageRelay) recover(retained []Event) {
@@ -375,7 +386,10 @@ func (r *sessionMessageRelay) recover(retained []Event) {
 		if !sessionMessagePending(message) || message.Spec.Type != kelos.SessionMessageTypeMessage {
 			continue
 		}
-		if request, ok := r.requests[sessionMessageRequestID(message)]; ok {
+		if request, ok := r.requests[sessionMessageRequestID(message)+sessionMessageRetrySuffix]; ok {
+			r.retried[message.UID] = struct{}{}
+			r.track(message, request.turnID, request.merged)
+		} else if request, ok := r.requests[sessionMessageRequestID(message)]; ok {
 			r.track(message, request.turnID, request.merged)
 		}
 	}
@@ -598,6 +612,12 @@ func (r *sessionMessageRelay) refresh(tracked *trackedSessionMessage) {
 		case "interrupted":
 			if turn.interrupting {
 				r.finish(tracked, kelos.SessionMessagePhaseCanceled, kelos.SessionMessageReasonInterrupted, "the turn was interrupted")
+			} else if !strings.HasSuffix(tracked.status.RequestID, sessionMessageRetrySuffix) {
+				// A restart is not the message's fault: run it once more.
+				r.untrack(tracked)
+				r.retried[tracked.uid] = struct{}{}
+				r.redeliver[tracked.uid] = struct{}{}
+				delete(r.handled, tracked.uid)
 			} else {
 				r.finish(tracked, kelos.SessionMessagePhaseFailed, kelos.SessionMessageReasonPodLost, "the Session runtime restarted while the turn was running")
 			}
@@ -642,7 +662,7 @@ func (r *sessionMessageRelay) track(message *kelos.SessionMessage, turnID string
 	tracked.status = kelos.SessionMessageStatus{
 		Phase:      kelos.SessionMessagePhaseAccepted,
 		PodUID:     r.server.config.PodUID,
-		RequestID:  sessionMessageRequestID(message),
+		RequestID:  r.requestID(message),
 		TurnID:     turnID,
 		AcceptedAt: &now,
 	}
@@ -758,7 +778,7 @@ func sessionMessageRetryable(err error) bool {
 
 // deliverMessage reports whether the message left the Pending phase.
 func (r *sessionMessageRelay) deliverMessage(message *kelos.SessionMessage) bool {
-	requestID := sessionMessageRequestID(message)
+	requestID := r.requestID(message)
 	turnID, merged, err := r.server.submitParsedMessageTurn(message.Spec.Text, requestID, sessionCommand{kind: sessionCommandMessage, text: message.Spec.Text})
 	if err != nil {
 		if sessionMessageRetryable(err) || r.server.journal.Err() != nil {

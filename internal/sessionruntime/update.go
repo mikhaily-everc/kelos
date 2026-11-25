@@ -218,7 +218,9 @@ func (s *Server) sessionDrainReports() (updateReport, idleDrainReport *sessionup
 	s.submitMu.Lock()
 	defer s.submitMu.Unlock()
 	turnsComplete := s.outstanding == 0
-	return s.drainReportLocked(s.updateRequest, turnsComplete),
+	// A lone turn blocked on user input never ends by itself; the journal restores it on the new Pod.
+	blockedOnInput := s.outstanding == 1 && s.pendingInputCount.Load() > 0
+	return s.drainReportLocked(s.updateRequest, turnsComplete || blockedOnInput),
 		s.drainReportLocked(s.idleDrainRequest, turnsComplete && !s.backgroundActive.Load() && !s.hasPendingStatusPublishes())
 }
 
