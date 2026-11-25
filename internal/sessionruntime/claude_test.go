@@ -3,11 +3,47 @@ package sessionruntime
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestClaudeSessionStartKeepsTheConversationAcrossARestart(t *testing.T) {
+	state, configDir := t.TempDir(), t.TempDir()
+	config := ProviderConfig{StateDir: state, Environment: []string{"CLAUDE_CONFIG_DIR=" + configDir}}
+
+	// First start, no turn ever finishes: the ID must already be on disk for the next Pod.
+	first, resume, err := claudeSessionStart(config)
+	if err != nil || resume {
+		t.Fatalf("first start = (%q, %t, %v), want a fresh session", first, resume, err)
+	}
+	saved, err := os.ReadFile(filepath.Join(state, "claude-session-id"))
+	if err != nil || strings.TrimSpace(string(saved)) != first {
+		t.Fatalf("session ID was not saved at start: %q, %v", saved, err)
+	}
+
+	// Restart before Claude wrote a transcript: same ID, fresh (--resume would fail).
+	second, resume, err := claudeSessionStart(config)
+	if err != nil || second != first || resume {
+		t.Fatalf("restart without a transcript = (%q, %t, %v), want (%q, false)", second, resume, err, first)
+	}
+
+	// Restart once the transcript exists: same ID, resumed.
+	project := filepath.Join(configDir, "projects", "-workspace-repo")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, first+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	third, resume, err := claudeSessionStart(config)
+	if err != nil || third != first || !resume {
+		t.Fatalf("restart with a transcript = (%q, %t, %v), want (%q, true)", third, resume, err, first)
+	}
+}
 
 type channelWriteCloser struct {
 	writes chan []byte
