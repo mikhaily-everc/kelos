@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,6 +20,7 @@ import (
 // Pod configuration for the Claude credential chain; absent means no failover.
 const (
 	claudeTiersDirEnv   = "KELOS_CLAUDE_TIERS_DIR"
+	claudeTiersURLEnv   = "KELOS_CLAUDE_TIERS_URL"
 	claudeTierOrderEnv  = "KELOS_CLAUDE_TIER_ORDER"
 	claudeBifrostEnvEnv = "KELOS_CLAUDE_BIFROST_ENV"
 
@@ -45,12 +48,68 @@ type claudeTier struct {
 
 type claudeTierConfig struct {
 	dir     string
+	url     string
 	order   []string
 	bifrost map[string]string
+
+	mu     sync.Mutex
+	cached map[string]string
 }
 
-func claudeTierConfigFromEnvironment(environment []string) (claudeTierConfig, bool) {
+const claudeTiersFetchTimeout = 5 * time.Second
+
+// tokens reads each tier's token. A failed fetch serves the last good answer, so a gateway
+// blip never reads as "every token was removed" and drops the Session to the last tier.
+func (c *claudeTierConfig) tokens() map[string]string {
+	tokens := map[string]string{}
+	if c.dir != "" {
+		for _, name := range c.order {
+			if strings.ContainsAny(name, "/\\") {
+				continue
+			}
+			if data, err := os.ReadFile(filepath.Join(c.dir, name)); err == nil {
+				tokens[name] = strings.TrimSpace(string(data))
+			}
+		}
+	}
+	if c.url == "" {
+		return tokens
+	}
+	fetched, err := fetchClaudeTierTokens(c.url)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		logClaudeTier("fetch_failed", "", err.Error())
+		fetched = c.cached
+	} else {
+		c.cached = fetched
+	}
+	for name, token := range fetched {
+		tokens[name] = strings.TrimSpace(token)
+	}
+	return tokens
+}
+
+func fetchClaudeTierTokens(url string) (map[string]string, error) {
+	client := &http.Client{Timeout: claudeTiersFetchTimeout}
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("claude tier tokens unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("claude tier tokens answered %d", resp.StatusCode)
+	}
+	var tokens map[string]string
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&tokens); err != nil {
+		return nil, fmt.Errorf("claude tier tokens unreadable: %w", err)
+	}
+	return tokens, nil
+}
+
+func claudeTierConfigFromEnvironment(environment []string) (*claudeTierConfig, bool) {
 	dir := environmentValue(environment, claudeTiersDirEnv)
+	url := environmentValue(environment, claudeTiersURLEnv)
 	var bifrost map[string]string
 	if raw := environmentValue(environment, claudeBifrostEnvEnv); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &bifrost); err != nil {
@@ -58,14 +117,14 @@ func claudeTierConfigFromEnvironment(environment []string) (claudeTierConfig, bo
 			bifrost = nil
 		}
 	}
-	if dir == "" && len(bifrost) == 0 {
-		return claudeTierConfig{}, false
+	if dir == "" && url == "" && len(bifrost) == 0 {
+		return nil, false
 	}
 	order := environmentValue(environment, claudeTierOrderEnv)
 	if order == "" {
 		order = defaultTierChainText
 	}
-	config := claudeTierConfig{dir: dir, bifrost: bifrost}
+	config := &claudeTierConfig{dir: dir, url: url, bifrost: bifrost}
 	for _, name := range strings.Split(order, ",") {
 		if name = strings.TrimSpace(name); name != "" {
 			config.order = append(config.order, name)
@@ -75,8 +134,9 @@ func claudeTierConfigFromEnvironment(environment []string) (claudeTierConfig, bo
 }
 
 // available reads the tiers that hold a credential right now, in chain order.
-func (c claudeTierConfig) available(base []string) []claudeTier {
+func (c *claudeTierConfig) available(base []string) []claudeTier {
 	var tiers []claudeTier
+	tokens := c.tokens()
 	for _, name := range c.order {
 		if name == claudeTierBifrost {
 			if len(c.bifrost) == 0 {
@@ -94,12 +154,8 @@ func (c claudeTierConfig) available(base []string) []claudeTier {
 			tiers = append(tiers, claudeTier{name: name, fingerprint: name, env: env})
 			continue
 		}
-		if c.dir == "" || strings.ContainsAny(name, "/\\") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(c.dir, name))
-		token := strings.TrimSpace(string(data))
-		if err != nil || token == "" {
+		token := tokens[name]
+		if token == "" {
 			continue
 		}
 		sum := sha256.Sum256([]byte(token))
