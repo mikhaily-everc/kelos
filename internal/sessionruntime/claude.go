@@ -89,13 +89,9 @@ type ClaudeProvider struct {
 
 // NewClaudeProvider starts Claude Code in bidirectional stream-json mode.
 func NewClaudeProvider(ctx context.Context, config ProviderConfig) (*ClaudeProvider, error) {
-	sessionID := ""
-	if data, err := os.ReadFile(filepath.Join(config.StateDir, "claude-session-id")); err == nil {
-		sessionID = strings.TrimSpace(string(data))
-	}
-	resume := sessionID != ""
-	if sessionID == "" {
-		sessionID = string(uuid.NewUUID())
+	sessionID, resume, err := claudeSessionStart(config)
+	if err != nil {
+		return nil, err
 	}
 
 	args := claudeCommandArgs(config, sessionID, resume)
@@ -135,6 +131,39 @@ func NewClaudeProvider(ctx context.Context, config ProviderConfig) (*ClaudeProvi
 	}
 	go provider.readLoop(stdout)
 	return provider, nil
+}
+
+// claudeSessionStart saves the ID before Claude starts: saved at a turn's end, a lost Pod forgot it.
+func claudeSessionStart(config ProviderConfig) (string, bool, error) {
+	sessionID := ""
+	if data, err := os.ReadFile(filepath.Join(config.StateDir, "claude-session-id")); err == nil {
+		sessionID = strings.TrimSpace(string(data))
+	}
+	if sessionID == "" {
+		sessionID = string(uuid.NewUUID())
+		if err := writeClaudeSessionID(config.StateDir, sessionID); err != nil {
+			return "", false, fmt.Errorf("saving Claude Code session ID: %w", err)
+		}
+	}
+	// --resume fails for an ID with no transcript, so that case starts fresh under the same ID.
+	return sessionID, claudeTranscriptExists(config.Environment, sessionID), nil
+}
+
+func claudeTranscriptExists(environment []string, sessionID string) bool {
+	dir := ""
+	home := ""
+	for _, entry := range environment {
+		if value, ok := strings.CutPrefix(entry, "CLAUDE_CONFIG_DIR="); ok {
+			dir = value
+		} else if value, ok := strings.CutPrefix(entry, "HOME="); ok {
+			home = value
+		}
+	}
+	if dir == "" {
+		dir = filepath.Join(home, ".claude")
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "projects", "*", sessionID+".jsonl"))
+	return err == nil && len(matches) > 0
 }
 
 func claudeCommandArgs(config ProviderConfig, sessionID string, resume bool) []string {

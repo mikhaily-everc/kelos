@@ -3101,7 +3101,7 @@ func TestWriteClaudeSessionID(t *testing.T) {
 	}
 }
 
-func TestClaudeProviderPersistsSessionOnlyAfterCompletedTurn(t *testing.T) {
+func TestClaudeProviderPersistsSessionAtStartAndAfterCompletedTurn(t *testing.T) {
 	binDir := t.TempDir()
 	claudePath := filepath.Join(binDir, "claude")
 	if err := os.WriteFile(claudePath, []byte(`#!/bin/sh
@@ -3124,8 +3124,8 @@ done
 	defer provider.Close()
 
 	sessionPath := filepath.Join(stateDir, "claude-session-id")
-	if _, err := os.Stat(sessionPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("Claude session ID exists before a completed turn: %v", err)
+	if data, err := os.ReadFile(sessionPath); err != nil || strings.TrimSpace(string(data)) == "" {
+		t.Fatalf("Claude session ID was not saved before the first turn: %q, %v", data, err)
 	}
 	sink := newProviderTestSink(nil)
 	provider.SetEventSink(sink)
