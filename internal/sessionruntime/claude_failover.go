@@ -27,7 +27,7 @@ type failoverTurn struct {
 type FailoverClaudeProvider struct {
 	ctx     context.Context
 	config  ProviderConfig
-	tiers   claudeTierConfig
+	tiers   *claudeTierConfig
 	state   *claudeTierState
 	factory claudeInnerFactory
 	now     func() time.Time
@@ -65,7 +65,7 @@ func NewFailoverClaudeProvider(ctx context.Context, config ProviderConfig) (Prov
 	return newFailoverClaudeProvider(ctx, config, tiers, factory, time.Now)
 }
 
-func newFailoverClaudeProvider(ctx context.Context, config ProviderConfig, tiers claudeTierConfig, factory claudeInnerFactory, now func() time.Time) (Provider, error) {
+func newFailoverClaudeProvider(ctx context.Context, config ProviderConfig, tiers *claudeTierConfig, factory claudeInnerFactory, now func() time.Time) (Provider, error) {
 	w := &FailoverClaudeProvider{
 		ctx: ctx, config: config, tiers: tiers, factory: factory, now: now,
 		state: loadClaudeTierState(config.StateDir), sink: config.EventSink,

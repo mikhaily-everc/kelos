@@ -2,6 +2,8 @@ package sessionruntime
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,12 +253,12 @@ func TestFailoverSkipsATierWithNoToken(t *testing.T) {
 func TestClaudeResetTime(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	cases := map[string]time.Time{
-		"resets 1:40pm (UTC)":                  time.Date(2026, 11, 25, 13, 40, 0, 0, time.UTC),
-		"resets 9am (UTC)":                     time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC),
-		"resets 12:30am (UTC)":                 time.Date(2026, 11, 26, 0, 30, 0, 0, time.UTC),
-		"resets 2pm (America/New_York)":        time.Date(2026, 11, 25, 19, 0, 0, 0, time.UTC),
-		"limit reached, no reset time shown":   now.Add(time.Hour),
-		"resets 3pm (Nowhere/Invalid)":         now.Add(time.Hour),
+		"resets 1:40pm (UTC)":                time.Date(2026, 11, 25, 13, 40, 0, 0, time.UTC),
+		"resets 9am (UTC)":                   time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC),
+		"resets 12:30am (UTC)":               time.Date(2026, 11, 26, 0, 30, 0, 0, time.UTC),
+		"resets 2pm (America/New_York)":      time.Date(2026, 11, 25, 19, 0, 0, 0, time.UTC),
+		"limit reached, no reset time shown": now.Add(time.Hour),
+		"resets 3pm (Nowhere/Invalid)":       now.Add(time.Hour),
 	}
 	for text, want := range cases {
 		if got := claudeResetTime(text, now); !got.Equal(want) {
@@ -269,13 +271,51 @@ func TestClaudeTierFailure(t *testing.T) {
 	for text, want := range map[string]bool{
 		limitText: true,
 		"API Error: 401 {\"type\":\"authentication_error\"}": true,
-		"OAuth token has expired":                           true,
-		"Claude AI usage limit reached":                     true,
-		"tool crashed":                                      false,
-		"the turn finished with status \"failed\"":          false,
+		"OAuth token has expired":                            true,
+		"Claude AI usage limit reached":                      true,
+		"tool crashed":                                       false,
+		"the turn finished with status \"failed\"":           false,
 	} {
 		if got := claudeTierFailure(text); got != want {
 			t.Errorf("claudeTierFailure(%q) = %v, want %v", text, got, want)
 		}
+	}
+}
+
+func TestClaudeTierTokensComeFromTheURLAndSurviveAnOutage(t *testing.T) {
+	var mu sync.Mutex
+	body, status := `{"primary":"tok-a","secondary":" tok-b "}`, http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+	config, ok := claudeTierConfigFromEnvironment([]string{claudeTiersURLEnv + "=" + server.URL})
+	if !ok {
+		t.Fatal("URL source not recognised")
+	}
+	names := func() []string {
+		var names []string
+		for _, tier := range config.available(nil) {
+			names = append(names, tier.name)
+		}
+		return names
+	}
+	if got := strings.Join(names(), ","); got != "primary,secondary" {
+		t.Fatalf("tiers = %q", got)
+	}
+	mu.Lock()
+	body, status = "", http.StatusBadGateway
+	mu.Unlock()
+	if got := strings.Join(names(), ","); got != "primary,secondary" {
+		t.Fatalf("an outage dropped the tiers: %q", got)
+	}
+	mu.Lock()
+	body, status = `{"primary":"tok-a"}`, http.StatusOK
+	mu.Unlock()
+	if got := strings.Join(names(), ","); got != "primary" {
+		t.Fatalf("a cleared slot stayed: %q", got)
 	}
 }
