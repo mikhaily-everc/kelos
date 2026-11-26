@@ -39,6 +39,7 @@ type sessionMessageTurn struct {
 	interrupting bool
 	input        *kelos.SessionMessageInput
 	errorText    string
+	completedAt  time.Time
 	segment      string
 	segmentOpen  bool
 	lastText     string
@@ -58,6 +59,7 @@ type trackedSessionMessage struct {
 	text    string
 	turnID  string
 	final   bool
+	retryAt time.Time
 	status  kelos.SessionMessageStatus
 	written *kelos.SessionMessageStatus
 }
@@ -87,8 +89,8 @@ type sessionMessageRelay struct {
 	tracked     map[string]*trackedSessionMessage
 	handled     map[types.UID]struct{}
 	redeliver   map[types.UID]struct{}
-	retried     map[types.UID]struct{}
-	turns      map[string]*sessionMessageTurn
+	attempts    map[types.UID]int
+	turns       map[string]*sessionMessageTurn
 	inputs      map[string]string
 	requests    map[string]sessionMessageRequest
 	merged      []string
@@ -107,7 +109,7 @@ func newSessionMessageRelay(server *Server, client clientv1alpha2.SessionMessage
 		tracked:    map[string]*trackedSessionMessage{},
 		handled:    map[types.UID]struct{}{},
 		redeliver:  map[types.UID]struct{}{},
-		retried:    map[types.UID]struct{}{},
+		attempts:   map[types.UID]int{},
 		turns:      map[string]*sessionMessageTurn{},
 		inputs:     map[string]string{},
 		requests:   map[string]sessionMessageRequest{},
@@ -314,6 +316,7 @@ func (r *sessionMessageRelay) observe(observation sessionMessageObservation) {
 		}
 		delete(r.handled, message.UID)
 		delete(r.redeliver, message.UID)
+		delete(r.attempts, message.UID)
 		return
 	}
 	r.cache[message.Name] = message
@@ -344,12 +347,20 @@ func sessionMessageRequestID(message *kelos.SessionMessage) string {
 	return sessionMessageRequestPrefix + string(message.UID)
 }
 
-// requestID: the one retry after a lost turn gets its own ID, so the journal never maps it back.
+// requestID: each retry gets its own ID, so the journal never maps it back to the failed turn.
 func (r *sessionMessageRelay) requestID(message *kelos.SessionMessage) string {
-	if _, retried := r.retried[message.UID]; retried {
-		return sessionMessageRequestID(message) + sessionMessageRetrySuffix
+	return sessionMessageRequestID(message) + sessionMessageAttemptSuffix(r.attempts[message.UID])
+}
+
+// latestRequest finds the highest attempt the journal recorded for message.
+func (r *sessionMessageRelay) latestRequest(message *kelos.SessionMessage) (int, sessionMessageRequest, bool) {
+	for attempt := sessionMessageMaxRetries(); attempt >= 0; attempt-- {
+		id := sessionMessageRequestID(message) + sessionMessageAttemptSuffix(attempt)
+		if request, ok := r.requests[id]; ok {
+			return attempt, request, true
+		}
 	}
-	return sessionMessageRequestID(message)
+	return 0, sessionMessageRequest{}, false
 }
 
 // recover restores tracking for messages accepted before this process started
@@ -386,19 +397,37 @@ func (r *sessionMessageRelay) recover(retained []Event) {
 		if !sessionMessagePending(message) || message.Spec.Type != kelos.SessionMessageTypeMessage {
 			continue
 		}
-		if request, ok := r.requests[sessionMessageRequestID(message)+sessionMessageRetrySuffix]; ok {
-			r.retried[message.UID] = struct{}{}
-			r.track(message, request.turnID, request.merged)
-		} else if request, ok := r.requests[sessionMessageRequestID(message)]; ok {
+		if attempt, request, ok := r.latestRequest(message); ok {
+			r.attempts[message.UID] = attempt
 			r.track(message, request.turnID, request.merged)
 		}
 	}
 
+	adopted := map[*trackedSessionMessage]bool{}
 	for _, tracked := range recovered {
+		message := r.cache[tracked.name]
+		attempt, request, ok := r.latestRequest(message)
+		if tracked.final || !ok || attempt <= sessionMessageAttempt(tracked.status.RequestID) {
+			continue
+		}
+		// The retry was submitted but its status never written: adopt it rather than run it again.
+		r.untrack(tracked)
+		r.attempts[message.UID] = attempt
+		r.track(message, request.turnID, request.merged)
+		adopted[tracked] = true
+	}
+
+	for _, tracked := range recovered {
+		if adopted[tracked] {
+			continue
+		}
 		turn := r.turns[tracked.turnID]
 		podLost := tracked.status.PodUID != r.server.config.PodUID
 		if turn == nil || !turn.known {
 			if podLost && tracked.status.Phase == kelos.SessionMessagePhaseAccepted {
+				if tracked.status.Reason == kelos.SessionMessageReasonTransientRetry {
+					r.attempts[tracked.uid] = sessionMessageAttempt(tracked.status.RequestID) + 1
+				}
 				r.untrack(tracked)
 				r.redeliver[tracked.uid] = struct{}{}
 				delete(r.handled, tracked.uid)
@@ -528,6 +557,10 @@ func (r *sessionMessageRelay) apply(event Event) {
 		turn.closeSegment()
 		turn.done = true
 		turn.status = event.Status
+		turn.completedAt = r.now()
+		if event.Timestamp != nil {
+			turn.completedAt = *event.Timestamp
+		}
 		if event.Status == "merged" {
 			r.merged = append(r.merged, turn.messages...)
 			turn.messages = nil
@@ -603,6 +636,7 @@ func (r *sessionMessageRelay) refresh(tracked *trackedSessionMessage) {
 	status.Result = nil
 	status.Reason = ""
 	status.Message = ""
+	tracked.retryAt = time.Time{}
 	switch {
 	case turn.done:
 		switch turn.status {
@@ -612,10 +646,10 @@ func (r *sessionMessageRelay) refresh(tracked *trackedSessionMessage) {
 		case "interrupted":
 			if turn.interrupting {
 				r.finish(tracked, kelos.SessionMessagePhaseCanceled, kelos.SessionMessageReasonInterrupted, "the turn was interrupted")
-			} else if !strings.HasSuffix(tracked.status.RequestID, sessionMessageRetrySuffix) {
+			} else if sessionMessageAttempt(tracked.status.RequestID) == 0 {
 				// A restart is not the message's fault: run it once more.
 				r.untrack(tracked)
-				r.retried[tracked.uid] = struct{}{}
+				r.attempts[tracked.uid] = 1
 				r.redeliver[tracked.uid] = struct{}{}
 				delete(r.handled, tracked.uid)
 			} else {
@@ -627,6 +661,15 @@ func (r *sessionMessageRelay) refresh(tracked *trackedSessionMessage) {
 			message := turn.errorText
 			if message == "" {
 				message = fmt.Sprintf("the turn finished with status %q", turn.status)
+			}
+			attempt := sessionMessageAttempt(tracked.status.RequestID)
+			transient := sessionTransientFailure(turn.errorText)
+			if transient && attempt < sessionMessageMaxRetries() {
+				r.scheduleRetry(tracked, turn, attempt+1)
+				return
+			}
+			if transient {
+				message = fmt.Sprintf("the turn failed after %d retries on a transient error: %s", attempt, message)
 			}
 			r.finish(tracked, kelos.SessionMessagePhaseFailed, kelos.SessionMessageReasonTurnFailed, message)
 		}
@@ -640,9 +683,38 @@ func (r *sessionMessageRelay) refresh(tracked *trackedSessionMessage) {
 	}
 }
 
+// scheduleRetry keeps the failed turn in status so a restarted runtime re-derives the same retry.
+func (r *sessionMessageRelay) scheduleRetry(tracked *trackedSessionMessage, turn *sessionMessageTurn, attempt int) {
+	completedAt := turn.completedAt
+	if completedAt.IsZero() {
+		completedAt = r.now()
+	}
+	tracked.retryAt = completedAt.Add(sessionMessageRetryDelays[attempt-1])
+	message := fmt.Sprintf("retry %d of %d at %s after a transient error: %s", attempt, sessionMessageMaxRetries(), tracked.retryAt.UTC().Format(time.RFC3339), turn.errorText)
+	message, _ = truncateRunes(message, maxSessionMessageStatusMsgRunes)
+	tracked.status.Phase = kelos.SessionMessagePhaseAccepted
+	tracked.status.Reason = kelos.SessionMessageReasonTransientRetry
+	tracked.status.Message = message
+}
+
+// redeliverDue releases messages whose transient-retry delay has passed.
+func (r *sessionMessageRelay) redeliverDue() {
+	now := r.now()
+	for _, tracked := range r.tracked {
+		if tracked.final || tracked.retryAt.IsZero() || now.Before(tracked.retryAt) {
+			continue
+		}
+		r.attempts[tracked.uid] = sessionMessageAttempt(tracked.status.RequestID) + 1
+		r.untrack(tracked)
+		r.redeliver[tracked.uid] = struct{}{}
+		delete(r.handled, tracked.uid)
+	}
+}
+
 func (r *sessionMessageRelay) finish(tracked *trackedSessionMessage, phase kelos.SessionMessagePhase, reason, message string) {
 	message, _ = truncateRunes(message, maxSessionMessageStatusMsgRunes)
 	tracked.final = true
+	delete(r.attempts, tracked.uid)
 	tracked.status.Phase = phase
 	tracked.status.Reason = reason
 	tracked.status.Message = message
@@ -740,6 +812,7 @@ func (r *sessionMessageRelay) repointMerged(turn *sessionMessageTurn) {
 // deliverPending delivers undelivered messages in name order. A message that
 // the runtime cannot accept yet stays Pending, and later messages wait for it.
 func (r *sessionMessageRelay) deliverPending(ctx context.Context) {
+	r.redeliverDue()
 	blocked := false
 	for _, name := range r.sortedNames() {
 		message := r.cache[name]

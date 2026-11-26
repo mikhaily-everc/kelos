@@ -51,6 +51,8 @@ const (
 	SessionMessageReasonTurnLost = "TurnLost"
 	// SessionMessageReasonTurnFailed means the provider turn failed.
 	SessionMessageReasonTurnFailed = "TurnFailed"
+	// SessionMessageReasonTransientRetry means a transient failure will be retried.
+	SessionMessageReasonTransientRetry = "TransientRetry"
 	// SessionMessageReasonInterrupted means the turn was interrupted.
 	SessionMessageReasonInterrupted = "Interrupted"
 	// SessionMessageReasonRemoved means the message was removed before its turn started.
